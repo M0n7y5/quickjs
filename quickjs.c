@@ -49,11 +49,17 @@
 
 #define OPTIMIZE         1
 #define SHORT_OPCODES    1
+// --- LOCAL PATCH (quickjs_dart): upstream 2026-06-04 dropped the `#ifndef`
+// guard around DIRECT_DISPATCH, which made hook/build.dart's -DDIRECT_DISPATCH=0
+// (Linux/Android computed-goto SIGSEGV mitigation) get overridden. Re-add the
+// guard so the build define is honored. Remove if the mitigation is obsolete.
+#ifndef DIRECT_DISPATCH
 #if defined(__EMSCRIPTEN__)
 #define DIRECT_DISPATCH  0
 #else
 #define DIRECT_DISPATCH  1
 #endif
+#endif // LOCAL PATCH: end DIRECT_DISPATCH guard
 
 #if defined(__APPLE__)
 #define MALLOC_OVERHEAD  0
