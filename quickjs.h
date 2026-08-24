@@ -710,7 +710,14 @@ static inline JSValue JS_DupValue(JSContext *ctx, JSValueConst v)
         JSRefCountHeader *p = __js_rc(JS_VALUE_GET_PTR(v));
         p->ref_count++;
     }
+// --- LOCAL PATCH (quickjs_dart): casting a struct to its own type is a GNU
+// extension MSVC rejects (C2440). Without JS_CHECK_JSVALUE, JSValueConst is
+// JSValue (see the #define above), so the copy is already the cast's effect.
+#if defined(_MSC_VER) && !defined(JS_CHECK_JSVALUE)
+    return v;
+#else
     return (JSValue)v;
+#endif // LOCAL PATCH: end same-type cast
 }
 
 static inline JSValue JS_DupValueRT(JSRuntime *rt, JSValueConst v)
@@ -719,7 +726,12 @@ static inline JSValue JS_DupValueRT(JSRuntime *rt, JSValueConst v)
         JSRefCountHeader *p = __js_rc(JS_VALUE_GET_PTR(v));
         p->ref_count++;
     }
+// --- LOCAL PATCH (quickjs_dart): same-type struct cast, see JS_DupValue.
+#if defined(_MSC_VER) && !defined(JS_CHECK_JSVALUE)
+    return v;
+#else
     return (JSValue)v;
+#endif // LOCAL PATCH: end same-type cast
 }
 
 JS_BOOL JS_StrictEq(JSContext *ctx, JSValueConst op1, JSValueConst op2);

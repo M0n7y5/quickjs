@@ -120,7 +120,13 @@
 //#define FORCE_GC_AT_MALLOC
 
 #ifdef CONFIG_ATOMICS
+// --- LOCAL PATCH (quickjs_dart): MSVC has no <pthread.h>, and this file uses
+// no pthread_* symbol: Atomics.* here is built on C11 <stdatomic.h> alone
+// (only quickjs-libc.c, which we do not compile, needs pthreads). Remove if
+// upstream stops including it.
+#if !defined(_MSC_VER)
 #include <pthread.h>
+#endif // LOCAL PATCH: end pthread guard
 #include <stdatomic.h>
 #include <errno.h>
 #endif
