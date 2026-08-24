@@ -684,6 +684,18 @@ static inline JSRefCountHeader *__js_rc(void *ptr)
     return (JSRefCountHeader *)((uint32_t *)ptr - 1);
 }
 
+// --- LOCAL PATCH (quickjs_dart): adding or dropping the const on a JSValue is
+// written as a cast, which is a cast of a struct to its own type once
+// JSValueConst is JSValue. That is a GNU extension MSVC rejects (C2440), so
+// name both directions and let them be copies there.
+#if defined(_MSC_VER) && !defined(JS_CHECK_JSVALUE)
+#define JS_UNCONST(v) (v)
+#define JS_ASCONST(v) (v)
+#else
+#define JS_UNCONST(v) ((JSValue)(v))
+#define JS_ASCONST(v) ((JSValueConst)(v))
+#endif // LOCAL PATCH: end JSValue const casts
+
 static inline void JS_FreeValue(JSContext *ctx, JSValue v)
 {
     if (JS_VALUE_HAS_REF_COUNT(v)) {
@@ -710,14 +722,7 @@ static inline JSValue JS_DupValue(JSContext *ctx, JSValueConst v)
         JSRefCountHeader *p = __js_rc(JS_VALUE_GET_PTR(v));
         p->ref_count++;
     }
-// --- LOCAL PATCH (quickjs_dart): casting a struct to its own type is a GNU
-// extension MSVC rejects (C2440). Without JS_CHECK_JSVALUE, JSValueConst is
-// JSValue (see the #define above), so the copy is already the cast's effect.
-#if defined(_MSC_VER) && !defined(JS_CHECK_JSVALUE)
-    return v;
-#else
-    return (JSValue)v;
-#endif // LOCAL PATCH: end same-type cast
+    return JS_UNCONST(v); // LOCAL PATCH (quickjs_dart)
 }
 
 static inline JSValue JS_DupValueRT(JSRuntime *rt, JSValueConst v)
@@ -726,12 +731,7 @@ static inline JSValue JS_DupValueRT(JSRuntime *rt, JSValueConst v)
         JSRefCountHeader *p = __js_rc(JS_VALUE_GET_PTR(v));
         p->ref_count++;
     }
-// --- LOCAL PATCH (quickjs_dart): same-type struct cast, see JS_DupValue.
-#if defined(_MSC_VER) && !defined(JS_CHECK_JSVALUE)
-    return v;
-#else
-    return (JSValue)v;
-#endif // LOCAL PATCH: end same-type cast
+    return JS_UNCONST(v); // LOCAL PATCH (quickjs_dart)
 }
 
 JS_BOOL JS_StrictEq(JSContext *ctx, JSValueConst op1, JSValueConst op2);
