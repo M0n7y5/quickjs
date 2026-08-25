@@ -47,6 +47,15 @@
 #include "libunicode.h"
 #include "dtoa.h"
 
+// --- LOCAL PATCH (quickjs_dart): on Windows abort() ends the process through
+// __fastfail, leaving no report at all, so route the engine's sanity branches
+// to a reporter that names the call site. Must sit after <stdlib.h> above,
+// which declares abort itself.
+#if defined(_MSC_VER)
+void qjs_abort_report(const char *file, int line);
+#define abort() qjs_abort_report(__FILE__, __LINE__)
+#endif // LOCAL PATCH: end abort reporter
+
 #define OPTIMIZE         1
 #define SHORT_OPCODES    1
 // --- LOCAL PATCH (quickjs_dart): upstream 2026-06-04 dropped the `#ifndef`
