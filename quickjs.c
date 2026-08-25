@@ -656,7 +656,11 @@ typedef enum {
 } JSClosureTypeEnum;
 
 typedef struct JSClosureVar {
-    JSClosureTypeEnum closure_type : 3;
+    // --- LOCAL PATCH (quickjs_dart): MSVC gives an enum bitfield a signed
+    // underlying type, so the four enumerators from JS_CLOSURE_GLOBAL_DECL up
+    // read back negative and match no case in js_closure (default: abort()).
+    // The enum constants still assign and compare fine through this field.
+    uint8_t closure_type : 3; // was JSClosureTypeEnum closure_type : 3
     uint8_t is_lexical : 1; /* lexical variable */
     uint8_t is_const : 1; /* const variable (is_lexical = 1 if is_const = 1 */
     uint8_t var_kind : 4; /* see JSVarKindEnum */
