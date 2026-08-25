@@ -266,16 +266,12 @@ typedef enum OPCodeEnum OPCodeEnum;
 #define JS_MALLOC_BLOCK_SIZE_COUNT 31
 #define JS_MALLOC_MIN_SMALL_SIZE 16
 #define JS_MALLOC_MAX_SMALL_SIZE 512
-// --- LOCAL PATCH (quickjs_dart): honor a build define so a host-malloc-only
-// run can be compared against the arena allocator.
-#ifndef JS_MALLOC_LARGE_BLOCKS_ONLY
 #if defined(__SANITIZE_ADDRESS__)
 /* use the host malloc() for all allocations */
 #define JS_MALLOC_LARGE_BLOCKS_ONLY 1
 #else
 #define JS_MALLOC_LARGE_BLOCKS_ONLY 0
 #endif
-#endif // LOCAL PATCH: end allocator override
 
 /* allow iteration among the allocated blocks. Currently not used. May
    be used to suppress the memory overhead of JSGCObjectHeader */

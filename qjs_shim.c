@@ -440,50 +440,14 @@ void qjs_timeout_install(JSRuntime *rt, QjsTimeoutState *s) {
 
 #if defined(_MSC_VER)
 #include <stdio.h>
-#include <signal.h>
 
-/* The MSVC bring-up hits a silent 0xC0000409 with no crash report, which is
- * what the CRT raises through __fastfail when a runtime check fires. Both
- * handlers below run inside this DLL's own CRT copy (/LD implies /MT), so they
- * name the failing call instead of losing it. */
-static void qjs_report(const char *what) {
-    FILE *f = fopen("qjs_crt.log", "a");
-    if (f) {
-        fputs(what, f);
-        fputc('\n', f);
-        fclose(f);
-    }
-}
-
-static void qjs_invalid_parameter(
-    const wchar_t *expression, const wchar_t *function, const wchar_t *file,
-    unsigned int line, uintptr_t reserved) {
-    char buf[512];
-    (void)reserved;
-    snprintf(buf, sizeof(buf),
-             "invalid parameter: expression=%ls function=%ls file=%ls line=%u",
-             expression ? expression : L"?", function ? function : L"?",
-             file ? file : L"?", line);
-    qjs_report(buf);
-}
-
-static void qjs_on_abort(int sig) {
-    (void)sig;
-    qjs_report("abort() raised");
-}
-
-void qjs_install_crt_diagnostics(void) {
-    _set_invalid_parameter_handler(qjs_invalid_parameter);
-    signal(SIGABRT, qjs_on_abort);
-}
-
+/* Windows ends the process through __fastfail on abort(), which leaves no
+ * message at all, so name the call site before going down. Routed here by the
+ * abort macro in quickjs.c. */
 #undef abort
 void qjs_abort_report(const char *file, int line) {
-    char buf[512];
-    snprintf(buf, sizeof(buf), "abort at %s:%d", file, line);
-    qjs_report(buf);
+    fprintf(stderr, "quickjs_dart: abort at %s:%d\n", file, line);
+    fflush(stderr);
     abort();
 }
-#else
-void qjs_install_crt_diagnostics(void) {}
 #endif
