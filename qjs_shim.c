@@ -476,6 +476,14 @@ void qjs_install_crt_diagnostics(void) {
     _set_invalid_parameter_handler(qjs_invalid_parameter);
     signal(SIGABRT, qjs_on_abort);
 }
+
+#undef abort
+void qjs_abort_report(const char *file, int line) {
+    char buf[512];
+    snprintf(buf, sizeof(buf), "abort at %s:%d", file, line);
+    qjs_report(buf);
+    abort();
+}
 #else
 void qjs_install_crt_diagnostics(void) {}
 #endif
