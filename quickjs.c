@@ -279,7 +279,16 @@ typedef enum OPCodeEnum OPCodeEnum;
    block_size_idx), but it would require a division to recover the block
    index.
 */
-typedef struct JSMallocBlockHeader {
+// --- LOCAL PATCH (quickjs_dart): the GNU aligned attribute on a member also
+// raises the whole struct's alignment, which is what the allocator relies on.
+// MSVC has no member form, so ask for the struct alignment directly.
+#if defined(_MSC_VER)
+#define JS_MALLOC_ALIGNED __declspec(align(JS_MALLOC_ALIGN))
+#else
+#define JS_MALLOC_ALIGNED
+#endif // LOCAL PATCH
+
+typedef struct JS_MALLOC_ALIGNED JSMallocBlockHeader {
     union {
         uint16_t block_idx; /* FREE_NIL if large block */
         uint16_t free_next; /* FREE_NIL if none */
@@ -298,7 +307,7 @@ typedef struct JSMallocLargeBlockHeader {
     JSMallocBlockHeader header;
 } JSMallocLargeBlockHeader;
 
-typedef struct {
+typedef struct JS_MALLOC_ALIGNED {
     struct list_head free_link;
     struct list_head link;
     uint8_t block_size_idx;
@@ -313,7 +322,7 @@ typedef struct {
     __attribute__((aligned(JS_MALLOC_ALIGN))) uint8_t blocks[];
 } JSMallocArena;
 
-typedef struct {
+typedef struct JS_MALLOC_ALIGNED {
     struct list_head arena_list[JS_MALLOC_BLOCK_SIZE_COUNT]; /* list of JSMallocArena.link (all arenas) */
     struct list_head free_arena_list[JS_MALLOC_BLOCK_SIZE_COUNT]; /* list of JSMallocArena.free_link (arenas where n_used_blocks < n_blocks) */
 #ifdef JS_MALLOC_USE_ITER

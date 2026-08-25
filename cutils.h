@@ -149,6 +149,13 @@ static inline int ctz64(uint64_t a)
     return __builtin_ctzll(a);
 }
 
+// --- LOCAL PATCH (quickjs_dart): MSVC has no packed attribute, only #pragma
+// pack, which a macro cannot place. These three exist so the get_/put_ helpers
+// below can read unaligned bytes; without packing the compiler is free to
+// assume natural alignment for them.
+#ifdef _MSC_VER
+#pragma pack(push, 1)
+#endif // LOCAL PATCH
 struct __attribute__((packed)) packed_u64 {
     uint64_t v;
 };
@@ -160,6 +167,9 @@ struct __attribute__((packed)) packed_u32 {
 struct __attribute__((packed)) packed_u16 {
     uint16_t v;
 };
+#ifdef _MSC_VER
+#pragma pack(pop)
+#endif // LOCAL PATCH: end packed access structs
 
 static inline uint64_t get_u64(const uint8_t *tab)
 {
