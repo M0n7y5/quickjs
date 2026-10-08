@@ -12,6 +12,7 @@
 // ---------------------------------------------------------------------------
 
 #include "quickjs.h"
+#include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
 
@@ -157,8 +158,11 @@ typedef struct {
     QjsBridgeRequest requests[QJS_BRIDGE_QUEUE_SIZE];
     int count;               // Slots not free
     int64_t last_id;
+    size_t max_payload;      // JSON bytes allowed per request; 0 = no cap
     JSContext *ctx;           // Context for this bridge
 } QjsBridgeQueue;
+
+#define QJS_PAYLOAD_TOO_LARGE "QJS_PAYLOAD_TOO_LARGE"
 
 QjsBridgeQueue *qjs_bridge_queue_new(JSContext *ctx) {
     QjsBridgeQueue *q = (QjsBridgeQueue *)malloc(sizeof(QjsBridgeQueue));
@@ -166,6 +170,23 @@ QjsBridgeQueue *qjs_bridge_queue_new(JSContext *ctx) {
     memset(q, 0, sizeof(QjsBridgeQueue));
     q->ctx = ctx;
     return q;
+}
+
+void qjs_bridge_set_max_payload(QjsBridgeQueue *q, size_t max_payload) {
+    if (q) q->max_payload = max_payload;
+}
+
+// An Error with e.message, not a plain string, so JS catch(e) reads it as
+// usual; [code], when given, becomes e.code.
+static JSValue qjs_new_error(JSContext *ctx, const char *message,
+                             const char *code) {
+    JSValue error_obj = JS_NewError(ctx);
+    JS_SetPropertyStr(ctx, error_obj, "message",
+                      JS_NewString(ctx, message ? message : "Unknown error"));
+    if (code) {
+        JS_SetPropertyStr(ctx, error_obj, "code", JS_NewString(ctx, code));
+    }
+    return error_obj;
 }
 
 static void qjs_bridge_release(QjsBridgeQueue *q, QjsBridgeRequest *req) {
@@ -233,6 +254,22 @@ static JSValue qjs_bridge_call_impl(JSContext *ctx, JSValueConst this_val,
     if (JS_IsException(promise)) {
         JS_FreeCString(ctx, cstr);
         return JS_EXCEPTION;
+    }
+
+    // The cap fails only this call: its promise rejects and nothing is queued.
+    if (queue->max_payload && len > queue->max_payload) {
+        char message[128];
+        snprintf(message, sizeof message,
+                 "bridge payload of %zu bytes exceeds the limit of %zu bytes",
+                 len, queue->max_payload);
+        JS_FreeCString(ctx, cstr);
+        JSValue error_obj = qjs_new_error(ctx, message, QJS_PAYLOAD_TOO_LARGE);
+        JSValue ret = JS_Call(ctx, resolving_funcs[1], JS_UNDEFINED, 1, &error_obj);
+        JS_FreeValue(ctx, ret);
+        JS_FreeValue(ctx, error_obj);
+        JS_FreeValue(ctx, resolving_funcs[0]);
+        JS_FreeValue(ctx, resolving_funcs[1]);
+        return promise;
     }
 
     // Copy the JSON string (JS_FreeCString will free cstr)
@@ -325,19 +362,17 @@ int qjs_bridge_resolve(QjsBridgeQueue *q, int64_t id, const char *result_json) {
     return 0;
 }
 
-// Rejects request [id] with an error message.
+// Rejects request [id] with an Error carrying [error_message] and, when not
+// NULL, [code] as e.code.
 // Returns 0 on success, -1 if no such request is outstanding.
-int qjs_bridge_reject(QjsBridgeQueue *q, int64_t id, const char *error_message) {
+int qjs_bridge_reject(QjsBridgeQueue *q, int64_t id, const char *error_message,
+                      const char *code) {
     QjsBridgeRequest *req = qjs_bridge_find(q, id);
     if (!req) return -1;
 
     JSContext *ctx = q->ctx;
 
-    // Wrap the message in a proper Error object so that JS catch(e) gets
-    // an Error with e.message, not a plain string.
-    JSValue err_str = JS_NewString(ctx, error_message ? error_message : "Unknown error");
-    JSValue error_obj = JS_NewError(ctx);
-    JS_SetPropertyStr(ctx, error_obj, "message", err_str);
+    JSValue error_obj = qjs_new_error(ctx, error_message, code);
     JSValue ret = JS_Call(ctx, req->reject, JS_UNDEFINED, 1, &error_obj);
     JS_FreeValue(ctx, ret);
     JS_FreeValue(ctx, error_obj);
