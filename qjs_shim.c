@@ -131,16 +131,22 @@ JSValue qjs_new_string(JSContext *ctx, const char *str) {
 // fjs.bridge_call(payload):
 //   1. This C function JSON-serializes the payload
 //   2. Creates a JS Promise
-//   3. Stores {json, resolve, reject} in a ring buffer
+//   3. Stores {id, json, resolve, reject} in a free slot, marked queued
 //   4. Returns the Promise to JS
 //
-// Dart later reads the queue, processes the request, and calls
-// qjs_bridge_resolve/reject to settle the promise.
+// Dart takes queued requests in call order with qjs_bridge_take, then
+// settles each by id with qjs_bridge_resolve/reject, in whatever order the
+// responses arrive, or discards it with qjs_bridge_drop. Ids are never
+// reused, so a response for a dropped request finds nothing and is ignored.
 // ===========================================================================
 
 #define QJS_BRIDGE_QUEUE_SIZE 64
 
+enum { QJS_SLOT_FREE, QJS_SLOT_QUEUED, QJS_SLOT_TAKEN };
+
 typedef struct {
+    int state;
+    int64_t id;
     char *payload_json;      // Heap-allocated JSON string (owned)
     size_t payload_len;      // Length of JSON string
     JSValue resolve;         // Promise resolve function (ref-counted)
@@ -149,14 +155,10 @@ typedef struct {
 
 typedef struct {
     QjsBridgeRequest requests[QJS_BRIDGE_QUEUE_SIZE];
-    int head;                // Next slot to read from
-    int tail;                // Next slot to write to
-    int count;               // Number of pending requests
+    int count;               // Slots not free
+    int64_t last_id;
     JSContext *ctx;           // Context for this bridge
 } QjsBridgeQueue;
-
-// Per-runtime bridge queue, stored via JS_SetRuntimeOpaque.
-// We allocate one per runtime.
 
 QjsBridgeQueue *qjs_bridge_queue_new(JSContext *ctx) {
     QjsBridgeQueue *q = (QjsBridgeQueue *)malloc(sizeof(QjsBridgeQueue));
@@ -166,16 +168,30 @@ QjsBridgeQueue *qjs_bridge_queue_new(JSContext *ctx) {
     return q;
 }
 
+static void qjs_bridge_release(QjsBridgeQueue *q, QjsBridgeRequest *req) {
+    free(req->payload_json);
+    req->payload_json = NULL;
+    JS_FreeValue(q->ctx, req->resolve);
+    JS_FreeValue(q->ctx, req->reject);
+    req->state = QJS_SLOT_FREE;
+    q->count--;
+}
+
+static QjsBridgeRequest *qjs_bridge_find(QjsBridgeQueue *q, int64_t id) {
+    if (!q) return NULL;
+    for (int i = 0; i < QJS_BRIDGE_QUEUE_SIZE; i++) {
+        QjsBridgeRequest *req = &q->requests[i];
+        if (req->state != QJS_SLOT_FREE && req->id == id) return req;
+    }
+    return NULL;
+}
+
 void qjs_bridge_queue_free(QjsBridgeQueue *q) {
     if (!q) return;
-    // Free any remaining requests
-    while (q->count > 0) {
-        QjsBridgeRequest *req = &q->requests[q->head];
-        free(req->payload_json);
-        JS_FreeValue(q->ctx, req->resolve);
-        JS_FreeValue(q->ctx, req->reject);
-        q->head = (q->head + 1) % QJS_BRIDGE_QUEUE_SIZE;
-        q->count--;
+    for (int i = 0; i < QJS_BRIDGE_QUEUE_SIZE; i++) {
+        if (q->requests[i].state != QJS_SLOT_FREE) {
+            qjs_bridge_release(q, &q->requests[i]);
+        }
     }
     free(q);
 }
@@ -231,13 +247,14 @@ static JSValue qjs_bridge_call_impl(JSContext *ctx, JSValueConst this_val,
     memcpy(payload_copy, cstr, len + 1);
     JS_FreeCString(ctx, cstr);
 
-    // Enqueue
-    QjsBridgeRequest *req = &queue->requests[queue->tail];
+    QjsBridgeRequest *req = &queue->requests[0];
+    while (req->state != QJS_SLOT_FREE) req++;
+    req->state = QJS_SLOT_QUEUED;
+    req->id = ++queue->last_id;
     req->payload_json = payload_copy;
     req->payload_len = len;
     req->resolve = resolving_funcs[0];  // Takes ownership of ref
     req->reject = resolving_funcs[1];   // Takes ownership of ref
-    queue->tail = (queue->tail + 1) % QJS_BRIDGE_QUEUE_SIZE;
     queue->count++;
 
     return promise;
@@ -247,45 +264,36 @@ static JSValue qjs_bridge_call_impl(JSContext *ctx, JSValueConst this_val,
 // Bridge queue accessors for Dart FFI
 // ---------------------------------------------------------------------------
 
-// Returns the number of pending bridge requests.
+// Returns the number of requests not yet settled or dropped, taken or not.
 int qjs_bridge_pending_count(QjsBridgeQueue *q) {
     return q ? q->count : 0;
 }
 
-// Peeks at the next request's JSON payload. Returns NULL if empty.
-// The returned string is owned by the queue — do NOT free it.
-const char *qjs_bridge_peek_payload(QjsBridgeQueue *q, size_t *out_len) {
-    if (!q || q->count == 0) {
-        if (out_len) *out_len = 0;
-        return NULL;
+// Marks the oldest queued request as taken and returns its id, or 0 when
+// none is queued. The payload stays owned by the queue until the request is
+// settled or dropped.
+int64_t qjs_bridge_take(QjsBridgeQueue *q, const char **out_payload,
+                        size_t *out_len) {
+    QjsBridgeRequest *oldest = NULL;
+    for (int i = 0; q && i < QJS_BRIDGE_QUEUE_SIZE; i++) {
+        QjsBridgeRequest *req = &q->requests[i];
+        if (req->state == QJS_SLOT_QUEUED && (!oldest || req->id < oldest->id)) {
+            oldest = req;
+        }
     }
-    QjsBridgeRequest *req = &q->requests[q->head];
-    if (out_len) *out_len = req->payload_len;
-    return req->payload_json;
+    if (!oldest) return 0;
+    oldest->state = QJS_SLOT_TAKEN;
+    *out_payload = oldest->payload_json;
+    *out_len = oldest->payload_len;
+    return oldest->id;
 }
 
-// Peeks at the i-th pending request's JSON payload (0-indexed from head).
-// Returns NULL if index is out of range.
-// The returned string is owned by the queue — do NOT free it.
-const char *qjs_bridge_peek_payload_at(QjsBridgeQueue *q, int index,
-                                        size_t *out_len) {
-    if (!q || index < 0 || index >= q->count) {
-        if (out_len) *out_len = 0;
-        return NULL;
-    }
-    int slot = (q->head + index) % QJS_BRIDGE_QUEUE_SIZE;
-    QjsBridgeRequest *req = &q->requests[slot];
-    if (out_len) *out_len = req->payload_len;
-    return req->payload_json;
-}
+// Resolves request [id] with a JSON string result.
+// Returns 0 on success, -1 if no such request is outstanding.
+int qjs_bridge_resolve(QjsBridgeQueue *q, int64_t id, const char *result_json) {
+    QjsBridgeRequest *req = qjs_bridge_find(q, id);
+    if (!req) return -1;
 
-// Resolves the next pending bridge request with a JSON string result.
-// Frees the request and advances the queue head.
-// Returns 0 on success, -1 on error.
-int qjs_bridge_resolve(QjsBridgeQueue *q, const char *result_json) {
-    if (!q || q->count == 0) return -1;
-
-    QjsBridgeRequest *req = &q->requests[q->head];
     JSContext *ctx = q->ctx;
 
     // Clear any pending exception before parsing (a prior JS operation
@@ -309,27 +317,20 @@ int qjs_bridge_resolve(QjsBridgeQueue *q, const char *result_json) {
         result = JS_UNDEFINED;
     }
 
-    // Call resolve(result)
     JSValue ret = JS_Call(ctx, req->resolve, JS_UNDEFINED, 1, &result);
     JS_FreeValue(ctx, ret);
     JS_FreeValue(ctx, result);
 
-    // Cleanup
-    free(req->payload_json);
-    req->payload_json = NULL;
-    JS_FreeValue(ctx, req->resolve);
-    JS_FreeValue(ctx, req->reject);
-
-    q->head = (q->head + 1) % QJS_BRIDGE_QUEUE_SIZE;
-    q->count--;
+    qjs_bridge_release(q, req);
     return 0;
 }
 
-// Rejects the next pending bridge request with an error message.
-int qjs_bridge_reject(QjsBridgeQueue *q, const char *error_message) {
-    if (!q || q->count == 0) return -1;
+// Rejects request [id] with an error message.
+// Returns 0 on success, -1 if no such request is outstanding.
+int qjs_bridge_reject(QjsBridgeQueue *q, int64_t id, const char *error_message) {
+    QjsBridgeRequest *req = qjs_bridge_find(q, id);
+    if (!req) return -1;
 
-    QjsBridgeRequest *req = &q->requests[q->head];
     JSContext *ctx = q->ctx;
 
     // Wrap the message in a proper Error object so that JS catch(e) gets
@@ -341,14 +342,16 @@ int qjs_bridge_reject(QjsBridgeQueue *q, const char *error_message) {
     JS_FreeValue(ctx, ret);
     JS_FreeValue(ctx, error_obj);
 
-    // Cleanup
-    free(req->payload_json);
-    req->payload_json = NULL;
-    JS_FreeValue(ctx, req->resolve);
-    JS_FreeValue(ctx, req->reject);
+    qjs_bridge_release(q, req);
+    return 0;
+}
 
-    q->head = (q->head + 1) % QJS_BRIDGE_QUEUE_SIZE;
-    q->count--;
+// Discards request [id] without settling it: its promise stays pending and
+// is collected with its last reference. Returns -1 if it is not outstanding.
+int qjs_bridge_drop(QjsBridgeQueue *q, int64_t id) {
+    QjsBridgeRequest *req = qjs_bridge_find(q, id);
+    if (!req) return -1;
+    qjs_bridge_release(q, req);
     return 0;
 }
 
