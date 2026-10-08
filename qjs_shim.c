@@ -355,6 +355,15 @@ int qjs_bridge_drop(QjsBridgeQueue *q, int64_t id) {
     return 0;
 }
 
+// Discards every outstanding request, taken or not.
+void qjs_bridge_drop_all(QjsBridgeQueue *q) {
+    for (int i = 0; q && i < QJS_BRIDGE_QUEUE_SIZE; i++) {
+        if (q->requests[i].state != QJS_SLOT_FREE) {
+            qjs_bridge_release(q, &q->requests[i]);
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Bridge setup: register fjs.bridge_call on globalThis
 // ---------------------------------------------------------------------------
@@ -393,23 +402,45 @@ void qjs_bridge_cleanup(QjsBridgeQueue *q) {
 // branch/call/jump operations. We store a monotonic-clock deadline
 // and return non-zero when it's exceeded, causing QuickJS to throw
 // an uncatchable InternalError.
+//
+// The same handler serves cancellation. Each eval runs under an epoch the
+// engine isolate sets with qjs_timeout_begin; any thread may store that epoch
+// with qjs_timeout_cancel while the runtime's thread is busy in JS. A stale
+// cancel names an earlier epoch and so never interrupts a later eval.
 // ===========================================================================
 
+#include <stdatomic.h>
 #include <time.h>
 
 typedef struct {
     int64_t deadline_ns;  // CLOCK_MONOTONIC nanoseconds; 0 = disabled
+    int64_t epoch;        // Eval running now; written by the runtime's thread
+    atomic_llong cancelled_epoch;
 } QjsTimeoutState;
 
 QjsTimeoutState *qjs_timeout_new(void) {
     QjsTimeoutState *s = (QjsTimeoutState *)malloc(sizeof(QjsTimeoutState));
     if (!s) return NULL;
     s->deadline_ns = 0;
+    s->epoch = 0;
+    atomic_init(&s->cancelled_epoch, 0);
     return s;
 }
 
 void qjs_timeout_free(QjsTimeoutState *s) {
     free(s);
+}
+
+void qjs_timeout_begin(QjsTimeoutState *s, int64_t epoch) {
+    if (s) s->epoch = epoch;
+}
+
+void qjs_timeout_cancel(QjsTimeoutState *s, int64_t epoch) {
+    if (s) atomic_store(&s->cancelled_epoch, epoch);
+}
+
+int qjs_timeout_is_cancelled(QjsTimeoutState *s) {
+    return s && s->epoch != 0 && atomic_load(&s->cancelled_epoch) == s->epoch;
 }
 
 void qjs_timeout_set(QjsTimeoutState *s, int64_t timeout_ms) {
@@ -430,7 +461,9 @@ void qjs_timeout_clear(QjsTimeoutState *s) {
 
 static int qjs_interrupt_handler(JSRuntime *rt, void *opaque) {
     QjsTimeoutState *s = (QjsTimeoutState *)opaque;
-    if (!s || s->deadline_ns == 0) return 0;
+    if (!s) return 0;
+    if (qjs_timeout_is_cancelled(s)) return 1;
+    if (s->deadline_ns == 0) return 0;
     struct timespec now;
     clock_gettime(CLOCK_MONOTONIC, &now);
     int64_t now_ns = (int64_t)now.tv_sec * 1000000000LL + (int64_t)now.tv_nsec;
